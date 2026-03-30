@@ -3,4 +3,3 @@ builder = "nixpacks"
 
 [deploy]
 startCommand = "python basket_soft.py"
-```

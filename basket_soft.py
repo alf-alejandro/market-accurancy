@@ -51,6 +51,7 @@ WAKE_UP_SECS         = 90
 ENTRY_WINDOW_SECS    = 85
 ENTRY_OPEN_SECS      = 60
 ENTRY_CLOSE_SECS     = 30
+RESOLUTION_MAX_SECS  = 15   # solo chequear resolucion cuando queden <= 15s
 
 CAPITAL_TOTAL        = 100.0
 ENTRY_PCT            = 0.01
@@ -584,6 +585,13 @@ def _is_confirmed_resolved(sym):
 
 def check_resolution():
     if not bt["positions"]:
+        return
+
+    secs = min_secs_remaining()
+    # Solo resolver si queda poco tiempo O si el mercado ya expiró (info=None)
+    # Evita cierres prematuros cuando el precio toca 0.98 con 40s+ restantes
+    market_expired = all(markets[s]["info"] is None for s in SYMBOLS)
+    if secs is not None and secs > RESOLUTION_MAX_SECS and not market_expired:
         return
 
     cerradas = []

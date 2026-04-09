@@ -51,7 +51,7 @@ WAKE_UP_SECS         = 90
 ENTRY_WINDOW_SECS    = 85
 ENTRY_OPEN_SECS      = 60
 ENTRY_CLOSE_SECS     = 30
-RESOLUTION_MAX_SECS  = 15   # solo chequear resolucion cuando queden <= 15s
+RESOLUTION_MAX_SECS  = 7   # solo chequear resolucion cuando queden <= 7s
 
 CAPITAL_TOTAL        = 100.0
 ENTRY_PCT            = 0.01

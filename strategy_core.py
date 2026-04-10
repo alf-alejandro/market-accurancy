@@ -8,7 +8,9 @@ v2: agrega find_active_market(symbol) para soportar ETH, SOL y BTC simultaneamen
 """
 
 import os
+import sys
 import time
+import json as _json
 import requests
 from datetime import datetime, timezone
 from collections import deque
@@ -98,20 +100,14 @@ def _order_book_live(token_id: str) -> bool:
 def find_active_market(symbol: str) -> dict | None:
     """
     Busca el mercado UP/DOWN 5m activo para el simbolo dado (SOL, BTC, ETH).
-    Estrategia robusta: en vez de depender del SLOT_ORIGIN fijo, genera todos
-    los slots posibles alineados a multiplos de SLOT_STEP en la ultima hora.
-    Esto funciona aunque el origen cambie con el tiempo.
     """
     slug_prefix = SLUG_PREFIXES.get(symbol.upper())
     if not slug_prefix:
         raise ValueError(f"Simbolo no soportado: {symbol}. Usa SOL, BTC o ETH.")
 
     now  = int(time.time())
-    # Base alineada al multiplo de 300 mas cercano hacia abajo
     base = now - (now % SLOT_STEP)
 
-    # Probar: slot actual, siguiente, anterior, y hasta 3 atras
-    # Cubre el caso donde el slot actual aun no tiene order book
     for offset in [0, 1, -1, 2, -2, -3]:
         ts   = base + offset * SLOT_STEP
         slug = f"{slug_prefix}-{ts}"
@@ -137,9 +133,7 @@ def fetch_market_resolution(condition_id: str) -> str | None:
     Consulta Gamma para obtener el resultado final de un mercado cerrado.
     Retorna 'UP', 'DOWN', o None si aún no está resuelto.
 
-    Endpoint correcto: GET /markets?conditionId=...  (no /markets/{id})
-    outcomePrices llega como string JSON: "[\"1\", \"0\"]" — hay que parsearlo.
-    outcomes llega como string JSON: "[\"Up\", \"Down\"]"
+    [DEBUG MODE ACTIVO] — imprime el payload raw de Gamma a stderr.
     """
     try:
         r = requests.get(
@@ -150,53 +144,93 @@ def fetch_market_resolution(condition_id: str) -> str | None:
         r.raise_for_status()
         data = r.json()
 
-        # Gamma retorna una lista — tomar el primero
         market = data[0] if isinstance(data, list) and data else data
         if not market:
+            print(f"[DEBUG GAMMA] condition_id={condition_id[:12]}... → respuesta vacía", file=sys.stderr, flush=True)
             return None
 
-        # outcomePrices es un string JSON tipo "[\"1\", \"0\"]" o "[\"0\", \"1\"]"
-        raw_prices  = market.get("outcomePrices")
+        # ══════════════════════════════════════════════
+        #  DEBUG: dump completo del payload de Gamma
+        # ══════════════════════════════════════════════
+        debug_fields = {
+            "conditionId":    market.get("conditionId", "")[:12] + "...",
+            "slug":           market.get("slug", ""),
+            "closed":         market.get("closed"),
+            "active":         market.get("active"),
+            "resolved":       market.get("resolved"),
+            "resolutionTime": market.get("resolutionTime"),
+            "outcomePrices":  market.get("outcomePrices"),
+            "outcomes":       market.get("outcomes"),
+            "winnerOutcome":  market.get("winnerOutcome"),
+            "resolvedBy":     market.get("resolvedBy"),
+            # dump de TODAS las keys para no perderse nada
+            "ALL_KEYS":       list(market.keys()),
+        }
+        print(
+            f"\n[DEBUG GAMMA] ── condition_id={condition_id[:12]}...\n"
+            + _json.dumps(debug_fields, indent=2, ensure_ascii=False),
+            file=sys.stderr,
+            flush=True,
+        )
+        # ══════════════════════════════════════════════
+
+        # --- Intento 1: campo winnerOutcome (algunos mercados lo tienen directo)
+        winner = market.get("winnerOutcome")
+        if winner:
+            label = str(winner).strip().upper()
+            if "UP" in label:
+                print(f"[DEBUG GAMMA] → resuelto via winnerOutcome: UP", file=sys.stderr, flush=True)
+                return "UP"
+            elif "DOWN" in label:
+                print(f"[DEBUG GAMMA] → resuelto via winnerOutcome: DOWN", file=sys.stderr, flush=True)
+                return "DOWN"
+
+        # --- Intento 2: outcomePrices (campo original)
+        raw_prices   = market.get("outcomePrices")
         raw_outcomes = market.get("outcomes")
 
         if raw_prices:
             try:
-                # Parsear el string JSON a lista
                 if isinstance(raw_prices, str):
-                    import json as _json
                     prices = [float(p) for p in _json.loads(raw_prices)]
                 else:
                     prices = [float(p) for p in raw_prices]
 
-                # outcomes también es string JSON: "[\"Up\", \"Down\"]"
+                print(f"[DEBUG GAMMA] → prices parseados: {prices}", file=sys.stderr, flush=True)
+
                 if raw_outcomes:
                     if isinstance(raw_outcomes, str):
-                        import json as _json
                         outcomes = _json.loads(raw_outcomes)
                     else:
                         outcomes = raw_outcomes
 
-                    # Buscar qué outcome tiene precio 1.0
+                    print(f"[DEBUG GAMMA] → outcomes parseados: {outcomes}", file=sys.stderr, flush=True)
+
                     for outcome, price in zip(outcomes, prices):
-                        if price >= 0.99:
-                            label = outcome.strip().upper()
+                        if price >= 0.95:   # bajamos de 0.99 a 0.95 por seguridad
+                            label = str(outcome).strip().upper()
+                            print(f"[DEBUG GAMMA] → winner por precio: outcome={outcome} price={price}", file=sys.stderr, flush=True)
                             if "UP" in label:
                                 return "UP"
                             elif "DOWN" in label:
                                 return "DOWN"
                 else:
                     # Sin outcomes labels — asumir índice 0=UP, 1=DOWN
-                    if prices[0] >= 0.99:
+                    if prices[0] >= 0.95:
+                        print(f"[DEBUG GAMMA] → winner por índice 0 (UP): price={prices[0]}", file=sys.stderr, flush=True)
                         return "UP"
-                    elif len(prices) > 1 and prices[1] >= 0.99:
+                    elif len(prices) > 1 and prices[1] >= 0.95:
+                        print(f"[DEBUG GAMMA] → winner por índice 1 (DOWN): price={prices[1]}", file=sys.stderr, flush=True)
                         return "DOWN"
 
-            except Exception:
-                pass
+            except Exception as e:
+                print(f"[DEBUG GAMMA] → error parseando outcomePrices: {e}", file=sys.stderr, flush=True)
 
+        print(f"[DEBUG GAMMA] → sin resolución detectada (None)", file=sys.stderr, flush=True)
         return None
 
-    except Exception:
+    except Exception as e:
+        print(f"[DEBUG GAMMA] → excepción: {e}", file=sys.stderr, flush=True)
         return None
 
 

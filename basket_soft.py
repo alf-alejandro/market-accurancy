@@ -29,6 +29,7 @@ from strategy_core import (
     find_active_market,
     get_order_book_metrics,
     seconds_remaining,
+    fetch_market_resolution,
 )
 
 logging.basicConfig(
@@ -98,6 +99,7 @@ bt = {
     "signal_div":   0.0,
     "entry_window": False,
     "positions":    [],          # ← LISTA de posiciones (máx 3)
+    "pending_positions": [],     # ← posiciones esperando resolución de Gamma
     "traded_this_cycle": False,
     "capital":      CAPITAL_TOTAL,
     "total_pnl":    0.0,
@@ -177,28 +179,70 @@ def update_drawdown():
 
 
 # ═══════════════════════════════════════════════════════
-#  RESOLUCIÓN FALLBACK — CLOB (SIN GAMMA)
+#  RESOLUCIÓN VÍA GAMMA (resultado real)
 # ═══════════════════════════════════════════════════════
 
-def resolve_from_clob_history(sym: str) -> str:
-    history = list(mid_history[sym])
-    if not history:
-        log_event(f"FALLBACK {sym}: sin historial CLOB — asumiendo LOSS")
-        return "_UNKNOWN"
+GAMMA_POLL_INTERVAL  = 5.0   # segundos entre consultas a Gamma
+GAMMA_TIMEOUT_SECS   = 600   # 10 min máximo esperando Gamma antes de abandonar
 
-    avg = sum(history) / len(history)
-    log_event(
-        f"FALLBACK {sym}: up_mid_avg={avg:.4f} "
-        f"(últimas {len(history)} muestras: {[round(v,4) for v in history]})"
-    )
+def _move_to_pending(pos: dict):
+    """Mueve una posición a pending — el resultado se sabrá cuando Gamma resuelva."""
+    sym = pos["asset"]
+    condition_id = (pos.get("market_info_snapshot") or {}).get("condition_id")
+    if not condition_id:
+        log_event(f"PENDING {sym}: sin condition_id — no se puede consultar Gamma. LOSS conservador.")
+        pnl = -ENTRY_USD
+        bt["capital"]   += ENTRY_USD + pnl
+        bt["total_pnl"] += pnl
+        bt["losses"]    += 1
+        update_drawdown()
+        _record_trade(pos, "UNKNOWN", "LOSS", pnl)
+        return
 
-    if avg > 0.5:
-        return "UP"
-    elif avg < 0.5:
-        return "DOWN"
-    else:
-        log_event(f"FALLBACK {sym}: empate técnico (avg=0.5) — asumiendo LOSS conservador")
-        return "_UNKNOWN"
+    pos["pending_since"] = time.time()
+    pos["condition_id"]  = condition_id
+    pos["gamma_polls"]   = 0
+    bt["pending_positions"].append(pos)
+    log_event(f"PENDING {sym} ({pos['side']}) — esperando resolución de Gamma (condition_id={condition_id[:8]}...)")
+
+
+def check_pending_resolutions():
+    """Consulta Gamma para cada posición pendiente. Cuando responde, registra el resultado real."""
+    if not bt["pending_positions"]:
+        return
+
+    resueltas = []
+    for pos in bt["pending_positions"]:
+        sym          = pos["asset"]
+        condition_id = pos["condition_id"]
+        elapsed      = time.time() - pos["pending_since"]
+        pos["gamma_polls"] += 1
+
+        resolved = fetch_market_resolution(condition_id)
+
+        if resolved in ("UP", "DOWN"):
+            log_event(f"GAMMA {sym}: resuelto → {resolved} (después de {elapsed:.0f}s, {pos['gamma_polls']} polls)")
+            _apply_resolution(pos, resolved)
+            resueltas.append(pos)
+
+        elif elapsed > GAMMA_TIMEOUT_SECS:
+            log_event(f"GAMMA {sym}: timeout {GAMMA_TIMEOUT_SECS}s sin respuesta — LOSS conservador")
+            pnl = -ENTRY_USD
+            bt["capital"]   += ENTRY_USD + pnl
+            bt["total_pnl"] += pnl
+            bt["losses"]    += 1
+            update_drawdown()
+            _record_trade(pos, "TIMEOUT", "LOSS", pnl)
+            resueltas.append(pos)
+
+        else:
+            log_event(f"GAMMA {sym}: sin resolución aún ({elapsed:.0f}s esperando...)")
+
+    for pos in resueltas:
+        bt["pending_positions"].remove(pos)
+
+    if resueltas:
+        write_state()
 
 
 # ═══════════════════════════════════════════════════════
@@ -588,36 +632,24 @@ def check_resolution():
         return
 
     secs = min_secs_remaining()
-    # Solo resolver si queda poco tiempo O si el mercado ya expiró (info=None)
-    # Evita cierres prematuros cuando el precio toca 0.98 con 40s+ restantes
     market_expired = all(markets[s]["info"] is None for s in SYMBOLS)
     if secs is not None and secs > RESOLUTION_MAX_SECS and not market_expired:
         return
 
     cerradas = []
     for pos in bt["positions"]:
-        sym    = pos["asset"]
+        sym = pos["asset"]
 
+        # Primero intentar confirmar por CLOB (precio sostenido 0.98/0.02 por 5s)
         resolved = _is_confirmed_resolved(sym)
-
         if resolved:
             _apply_resolution(pos, resolved)
             cerradas.append(pos)
             continue
 
-        # Mercado expirado sin precio concluyente → fallback CLOB
-        if markets[sym]["info"] is None:
-            resolved = resolve_from_clob_history(sym)
-            if resolved == "_UNKNOWN":
-                log_event(f"FALLBACK {sym}: resolución imposible — LOSS conservador")
-                pnl = -ENTRY_USD
-                bt["capital"]   += ENTRY_USD + pnl
-                bt["total_pnl"] += pnl
-                bt["losses"]    += 1
-                update_drawdown()
-                _record_trade(pos, "UNKNOWN", "LOSS", pnl)
-            else:
-                _apply_resolution(pos, resolved)
+        # Mercado expirado sin confirmación CLOB → esperar a Gamma
+        if market_expired or (secs is not None and secs <= 0):
+            _move_to_pending(pos)
             cerradas.append(pos)
 
     for pos in cerradas:
@@ -752,7 +784,7 @@ async def main_loop():
         try:
             secs = min_secs_remaining()
 
-            if secs is not None and secs > WAKE_UP_SECS and not bt["positions"]:
+            if secs is not None and secs > WAKE_UP_SECS and not bt["positions"] and not bt["pending_positions"]:
                 sleep_duration = secs - WAKE_UP_SECS
                 wake_at = datetime.fromtimestamp(time.time() + sleep_duration).strftime("%H:%M:%S")
                 bt["phase"]        = "DURMIENDO"
@@ -787,11 +819,15 @@ async def main_loop():
             if bt["positions"]:
                 check_resolution()
 
+            # Revisar posiciones esperando Gamma (resultado real)
+            if bt["pending_positions"]:
+                check_pending_resolutions()
+
             if all(markets[s]["info"] is None for s in SYMBOLS):
                 if bt["positions"]:
-                    log_event("Mercado expirado con posiciones abiertas — resolviendo con historial CLOB...")
+                    log_event("Mercado expirado con posiciones abiertas — moviendo a pendientes...")
                     check_resolution()
-                if not bt["positions"]:
+                if not bt["positions"] and not bt["pending_positions"]:
                     log_event("Ciclo expirado — buscando nuevo ciclo...")
                     await discover_all()
                 continue

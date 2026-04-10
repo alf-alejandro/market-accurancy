@@ -196,7 +196,7 @@ def _move_to_pending(pos: dict):
         bt["total_pnl"] += pnl
         bt["losses"]    += 1
         update_drawdown()
-        _record_trade(pos, "UNKNOWN", "LOSS", pnl)
+        _record_trade(pos, "UNKNOWN", "LOSS", pnl, source="UNKNOWN")
         return
 
     pos["pending_since"] = time.time()
@@ -228,7 +228,7 @@ async def pending_resolution_loop():
 
             if resolved in ("UP", "DOWN"):
                 log_event(f"GAMMA {sym}: resuelto → {resolved} (después de {elapsed:.0f}s, {pos['gamma_polls']} polls)")
-                _apply_resolution(pos, resolved)
+                _apply_resolution(pos, resolved, source="GAMMA")
                 resueltas.append(pos)
 
             elif elapsed > GAMMA_TIMEOUT_SECS:
@@ -238,7 +238,7 @@ async def pending_resolution_loop():
                 bt["total_pnl"] += pnl
                 bt["losses"]    += 1
                 update_drawdown()
-                _record_trade(pos, "TIMEOUT", "LOSS", pnl)
+                _record_trade(pos, "TIMEOUT", "LOSS", pnl, source="TIMEOUT")
                 resueltas.append(pos)
 
             else:
@@ -592,7 +592,7 @@ def check_entry():
 
 
 
-def _apply_resolution(pos, resolved):
+def _apply_resolution(pos, resolved, source="CLOB"):
     sym  = pos["asset"]
     side = pos["side"]
     if resolved == side:
@@ -607,10 +607,10 @@ def _apply_resolution(pos, resolved):
     bt["total_pnl"] += pnl
     update_drawdown()
     log_event(
-        f"RESOLUCIÓN {outcome} {side} {sym} → {resolved} | "
+        f"RESOLUCIÓN {outcome} [{source}] {side} {sym} → {resolved} | "
         f"PnL=${pnl:+.4f} | Capital=${bt['capital']:.4f}"
     )
-    _record_trade(pos, resolved, outcome, pnl)
+    _record_trade(pos, resolved, outcome, pnl, source=source)
 
 
 RESOLUTION_CONFIRM_SAMPLES = 10   # 10 muestras x 0.5s = 5s sostenidos
@@ -741,9 +741,9 @@ def _save_csv(record: dict):
         writer.writerow(record)
 
 
-def _record_trade(pos, resolved, outcome, pnl):
+def _record_trade(pos, resolved, outcome, pnl, source="CLOB"):
     exit_price = 1.0 if resolved == pos["side"] else 0.0
-    record = _build_trade_record(pos, "RESOLUTION", exit_price, resolved, outcome, pnl)
+    record = _build_trade_record(pos, source, exit_price, resolved, outcome, pnl)
     bt["trades"].append(record)
     _save_csv(record)
     _save_log()

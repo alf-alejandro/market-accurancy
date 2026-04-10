@@ -136,34 +136,66 @@ def fetch_market_resolution(condition_id: str) -> str | None:
     """
     Consulta Gamma para obtener el resultado final de un mercado cerrado.
     Retorna 'UP', 'DOWN', o None si aún no está resuelto.
+
+    Endpoint correcto: GET /markets?conditionId=...  (no /markets/{id})
+    outcomePrices llega como string JSON: "[\"1\", \"0\"]" — hay que parsearlo.
+    outcomes llega como string JSON: "[\"Up\", \"Down\"]"
     """
     try:
-        r = requests.get(f"{GAMMA_API}/markets/{condition_id}", timeout=8)
+        r = requests.get(
+            f"{GAMMA_API}/markets",
+            params={"conditionId": condition_id},
+            timeout=8,
+        )
         r.raise_for_status()
         data = r.json()
 
-        # Gamma indica el resultado en outcomePrices o en los tokens
-        outcome_prices = data.get("outcomePrices")
-        if outcome_prices:
+        # Gamma retorna una lista — tomar el primero
+        market = data[0] if isinstance(data, list) and data else data
+        if not market:
+            return None
+
+        # outcomePrices es un string JSON tipo "[\"1\", \"0\"]" o "[\"0\", \"1\"]"
+        raw_prices  = market.get("outcomePrices")
+        raw_outcomes = market.get("outcomes")
+
+        if raw_prices:
             try:
-                prices = [float(p) for p in outcome_prices]
-                # outcomePrices[0] = YES/UP, outcomePrices[1] = NO/DOWN
-                if prices[0] >= 0.99:
-                    return "UP"
-                elif prices[1] >= 0.99:
-                    return "DOWN"
+                # Parsear el string JSON a lista
+                if isinstance(raw_prices, str):
+                    import json as _json
+                    prices = [float(p) for p in _json.loads(raw_prices)]
+                else:
+                    prices = [float(p) for p in raw_prices]
+
+                # outcomes también es string JSON: "[\"Up\", \"Down\"]"
+                if raw_outcomes:
+                    if isinstance(raw_outcomes, str):
+                        import json as _json
+                        outcomes = _json.loads(raw_outcomes)
+                    else:
+                        outcomes = raw_outcomes
+
+                    # Buscar qué outcome tiene precio 1.0
+                    for outcome, price in zip(outcomes, prices):
+                        if price >= 0.99:
+                            label = outcome.strip().upper()
+                            if "UP" in label:
+                                return "UP"
+                            elif "DOWN" in label:
+                                return "DOWN"
+                else:
+                    # Sin outcomes labels — asumir índice 0=UP, 1=DOWN
+                    if prices[0] >= 0.99:
+                        return "UP"
+                    elif len(prices) > 1 and prices[1] >= 0.99:
+                        return "DOWN"
+
             except Exception:
                 pass
 
-        # Alternativa: campo resolved + winner
-        if data.get("resolved"):
-            winner = (data.get("winner") or "").lower()
-            if "up" in winner:
-                return "UP"
-            elif "down" in winner:
-                return "DOWN"
-
         return None
+
     except Exception:
         return None
 

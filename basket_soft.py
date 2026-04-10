@@ -878,10 +878,12 @@ if __name__ == "__main__":
     t.start()
 
     try:
-        asyncio.run(asyncio.gather(
-            main_loop(),
-            pending_resolution_loop(),
-        ))
+        async def run_all():
+            await asyncio.gather(
+                main_loop(),
+                pending_resolution_loop(),
+            )
+        asyncio.run(run_all())
     except KeyboardInterrupt:
         log.info("Basket detenido.")
         total = bt["wins"] + bt["losses"]

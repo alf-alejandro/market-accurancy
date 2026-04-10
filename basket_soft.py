@@ -46,11 +46,11 @@ logging.getLogger("httpx").setLevel(logging.WARNING)
 #  PARÁMETROS
 # ═══════════════════════════════════════════════════════
 POLL_INTERVAL        = 0.5
-DIVERGENCE_THRESHOLD = 0.05
-DIVERGENCE_MAX       = 0.14
+DIVERGENCE_THRESHOLD = 0.06
+DIVERGENCE_MAX       = 0.12
 WAKE_UP_SECS         = 90
 ENTRY_WINDOW_SECS    = 85
-ENTRY_OPEN_SECS      = 60
+ENTRY_OPEN_SECS      = 65
 ENTRY_CLOSE_SECS     = 30
 RESOLUTION_MAX_SECS  = 7   # solo chequear resolucion cuando queden <= 7s
 
@@ -61,11 +61,11 @@ ENTRY_USD            = CAPITAL_TOTAL * ENTRY_PCT   # $1 por activo
 RESOLVED_UP_THRESH   = 0.98
 RESOLVED_DN_THRESH   = 0.02
 
-CONSENSUS_FULL       = 0.80
-CONSENSUS_SOFT       = 0.80
+CONSENSUS_FULL       = 0.77
+CONSENSUS_SOFT       = 0.66
 
-ENTRY_MIN_PRICE      = 0.65
-MID_HISTORY_SIZE     = 10   # 5 segundos a 0.5s de poll → resolución confirmada
+ENTRY_MIN_PRICE      = 0.68
+MID_HISTORY_SIZE     = 5   # 2.5 segundos a 0.5s de poll → resolución confirmada
 
 LOG_FILE   = os.environ.get("LOG_FILE",   "/data/basket_log.json")
 CSV_FILE   = os.environ.get("CSV_FILE",   "/data/basket_trades.csv")
@@ -701,7 +701,7 @@ def _apply_resolution(pos, resolved, source="CLOB"):
     _record_trade(pos, resolved, outcome, pnl, source=source)
 
 
-RESOLUTION_CONFIRM_SAMPLES = 10   # 10 muestras x 0.5s = 5s sostenidos
+RESOLUTION_CONFIRM_SAMPLES = 5   # 5 muestras x 0.5s = 2.5s sostenidos
 
 
 def _is_confirmed_resolved(sym):
@@ -734,7 +734,7 @@ def check_resolution():
     for pos in bt["positions"]:
         sym = pos["asset"]
 
-        # Primero intentar confirmar por CLOB (precio sostenido 0.98/0.02 por 5s)
+        # Primero intentar confirmar por CLOB (precio sostenido 0.98/0.02 por 2.5s)
         resolved = _is_confirmed_resolved(sym)
         if resolved:
             _apply_resolution(pos, resolved)

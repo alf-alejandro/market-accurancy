@@ -182,8 +182,7 @@ def update_drawdown():
 #  RESOLUCIÓN VÍA GAMMA (resultado real)
 # ═══════════════════════════════════════════════════════
 
-GAMMA_POLL_INTERVAL  = 3.0   # segundos entre polls (CLOB es la fuente primaria)
-GAMMA_TIMEOUT_SECS   = 600   # 10 min máximo antes de abandonar con LOSS
+GAMMA_POLL_INTERVAL  = 3.0   # segundos entre polls del CLOB
 
 def _move_to_pending(pos: dict):
     """Mueve una posición a pending — el resultado se sabrá cuando Gamma resuelva."""
@@ -297,11 +296,9 @@ async def pending_resolution_loop():
     """
     Loop independiente que corre en paralelo al main_loop.
 
-    Fuente primaria: CLOB directo (last-trade-price + order book).
-      → Refleja resolución on-chain inmediatamente, igual que la UI de Polymarket.
-      → Gamma tiene lag de minutos y bugs conocidos con closed/outcomePrices.
-
-    Fuente secundaria: Gamma API (solo como fallback adicional).
+    Usa CLOB directo (last-trade-price + order book) como unica fuente.
+    Si el CLOB no detecta resolucion en el primer poll -> LOSS conservador.
+    Gamma fue eliminado: tiene lag de minutos y bugs conocidos.
     """
     while True:
         await asyncio.sleep(GAMMA_POLL_INTERVAL)
@@ -311,10 +308,7 @@ async def pending_resolution_loop():
         resueltas = []
         for pos in list(bt["pending_positions"]):
             sym          = pos["asset"]
-            condition_id = pos.get("condition_id", "")
             elapsed      = time.time() - pos["pending_since"]
-            pos["gamma_polls"] += 1
-
             # ── Fuente 1: CLOB (last-trade-price + order book) ───────────────
             resolved = await _check_clob_resolution(pos)
             if resolved in ("UP", "DOWN"):
@@ -323,28 +317,15 @@ async def pending_resolution_loop():
                 resueltas.append(pos)
                 continue
 
-            # ── Fuente 2: Gamma (fallback — lag conocido de varios minutos) ──
-            resolved = fetch_market_resolution(
-                condition_id,
-                market_slug=pos.get("market_slug", ""),
-            )
-            if resolved in ("UP", "DOWN"):
-                log_event(f"RESOLUCION GAMMA {sym}: → {resolved} ({elapsed:.0f}s, {pos['gamma_polls']} polls)")
-                _apply_resolution(pos, resolved, source="GAMMA")
-                resueltas.append(pos)
-
-            elif elapsed > GAMMA_TIMEOUT_SECS:
-                log_event(f"TIMEOUT {sym}: {GAMMA_TIMEOUT_SECS}s sin respuesta CLOB ni Gamma — LOSS conservador")
-                pnl = -ENTRY_USD
-                bt["capital"]   += ENTRY_USD + pnl
-                bt["total_pnl"] += pnl
-                bt["losses"]    += 1
-                update_drawdown()
-                _record_trade(pos, "TIMEOUT", "LOSS", pnl, source="TIMEOUT")
-                resueltas.append(pos)
-
-            else:
-                log_event(f"PENDING {sym}: esperando CLOB/Gamma ({elapsed:.0f}s / {GAMMA_TIMEOUT_SECS}s máx)")
+            # CLOB no detecto resolucion -> LOSS conservador inmediato
+            log_event(f"LOSS CONSERVADOR {sym}: CLOB sin resolucion -> anotando perdida")
+            pnl = -ENTRY_USD
+            bt["capital"]   += ENTRY_USD + pnl
+            bt["total_pnl"] += pnl
+            bt["losses"]    += 1
+            update_drawdown()
+            _record_trade(pos, "UNRESOLVED", "LOSS", pnl, source="CLOB_NO_SIGNAL")
+            resueltas.append(pos)
 
         for pos in resueltas:
             bt["pending_positions"].remove(pos)
